@@ -6,6 +6,7 @@ const cors = require("cors");
 const connectDB = require("./config/db");
 const productRoutes = require('./routes/productRoutes');
 const authRoutes = require('./routes/authRoutes');
+const orderRoutes = require('./routes/orderRoutes');
 
 const app = express();
 
@@ -19,8 +20,16 @@ app.use(
 );
 
 app.use(express.json());
-app.use("/api/products", productRoutes);
+
 app.use("/api/auth", authRoutes);
+app.use("/api/products", productRoutes);
+app.get("/api/orders-test", (req, res) => {
+  res.json({
+    success: true,
+    message: "Orders routing is working",
+  });
+});
+app.use("/api/orders", orderRoutes);
 
 app.get("/", (req, res) => {
   res.json({

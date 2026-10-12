@@ -33,7 +33,7 @@ const register = async (req, res) => {
       typeof name !== "string" ||
       !name.trim() ||
       typeof useremail !== "string" ||
-      !email.trim() ||
+      !useremail.trim() ||
       typeof password !== "string" ||
       password.length < 8
     ) {
