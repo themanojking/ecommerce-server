@@ -1,9 +1,25 @@
+
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 
+// Restore reserved stock if order creation fails.
+const restoreStock = async (reservedItems) => {
+  for (const item of reservedItems) {
+    await Product.updateOne(
+      { _id: item.product },
+      {
+        $inc: { stock: item.quantity },
+        $set: { isAvailable: true },
+      }
+    );
+  }
+};
+
 // POST /api/orders
 const createOrder = async (req, res) => {
+  const reservedItems = [];
+
   try {
     const { orderItems, shippingAddress, paymentMethod } = req.body;
 
@@ -28,8 +44,7 @@ const createOrder = async (req, res) => {
     if (
       !shippingAddress ||
       requiredFields.some(
-        (field) =>
-          !String(shippingAddress[field] || "").trim()
+        (field) => !String(shippingAddress[field] || "").trim()
       )
     ) {
       return res.status(400).json({
@@ -48,6 +63,7 @@ const createOrder = async (req, res) => {
     let itemsPrice = 0;
     const validatedItems = [];
 
+    // Validate products and calculate prices on the server.
     for (const item of orderItems) {
       if (
         !mongoose.isValidObjectId(item.product) ||
@@ -79,8 +95,8 @@ const createOrder = async (req, res) => {
         });
       }
 
-      const price = Number(product.price);
       const quantity = Number(item.quantity);
+      const price = Number(product.price);
 
       itemsPrice += price * quantity;
 
@@ -88,6 +104,47 @@ const createOrder = async (req, res) => {
         product: product._id,
         quantity,
         price,
+        productName: product.productName,
+      });
+    }
+
+    // Reserve stock atomically to prevent overselling.
+    for (const item of validatedItems) {
+      const updatedProduct = await Product.findOneAndUpdate(
+        {
+          _id: item.product,
+          isAvailable: { $ne: false },
+          stock: { $gte: item.quantity },
+        },
+        [
+          {
+            $set: {
+              stock: { $subtract: ["$stock", item.quantity] },
+              isAvailable: {
+                $gt: [
+                  { $subtract: ["$stock", item.quantity] },
+                  0,
+                ],
+              },
+            },
+          },
+        ],
+        { new: true }
+      );
+
+      if (!updatedProduct) {
+        await restoreStock(reservedItems);
+        reservedItems.length = 0;
+
+        return res.status(400).json({
+          success: false,
+          message: `${item.productName} no longer has enough stock. Please refresh your cart.`,
+        });
+      }
+
+      reservedItems.push({
+        product: item.product,
+        quantity: item.quantity,
       });
     }
 
@@ -95,7 +152,11 @@ const createOrder = async (req, res) => {
 
     const order = await Order.create({
       user: req.user._id,
-      orderItems: validatedItems,
+      orderItems: validatedItems.map((item) => ({
+        product: item.product,
+        quantity: item.quantity,
+        price: item.price,
+      })),
       shippingAddress,
       paymentMethod: "COD",
       itemsPrice,
@@ -110,6 +171,13 @@ const createOrder = async (req, res) => {
     });
   } catch (error) {
     console.error("Create order error:", error);
+
+    // Restore stock if an error occurs after reserving it.
+    try {
+      await restoreStock(reservedItems);
+    } catch (restoreError) {
+      console.error("Stock restoration error:", restoreError);
+    }
 
     return res.status(500).json({
       success: false,
