@@ -111,26 +111,21 @@ const createOrder = async (req, res) => {
     // Reserve stock atomically to prevent overselling.
     for (const item of validatedItems) {
       const updatedProduct = await Product.findOneAndUpdate(
-        {
-          _id: item.product,
-          isAvailable: { $ne: false },
-          stock: { $gte: item.quantity },
-        },
-        [
-          {
-            $set: {
-              stock: { $subtract: ["$stock", item.quantity] },
-              isAvailable: {
-                $gt: [
-                  { $subtract: ["$stock", item.quantity] },
-                  0,
-                ],
-              },
-            },
-          },
-        ],
-        { new: true }
-      );
+  {
+    _id: item.product,
+    isAvailable: { $ne: false },
+    stock: { $gte: item.quantity },
+  },
+  {
+    $inc: { stock: -item.quantity },
+  },
+  { new: true }
+);
+
+if (updatedProduct && updatedProduct.stock === 0) {
+  updatedProduct.isAvailable = false;
+  await updatedProduct.save();
+}
 
       if (!updatedProduct) {
         await restoreStock(reservedItems);
