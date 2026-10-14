@@ -249,8 +249,85 @@ const getOrderById = async (req, res) => {
   }
 };
 
+
+const cancelMyOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order ID",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: id,
+      user: req.user._id,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    if (order.status === "Cancelled") {
+      return res.status(400).json({
+        success: false,
+        message: "Order is already cancelled",
+      });
+    }
+
+    // Only allow cancellation before shipping/delivery.
+    if (["Shipped", "Delivered"].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "This order can no longer be cancelled",
+      });
+    }
+
+    // Restore stock for each product.
+    for (const item of order.orderItems) {
+      const product = await Product.findByIdAndUpdate(
+        item.product,
+        {
+          $inc: { stock: item.quantity },
+          $set: { isAvailable: true },
+        },
+        { new: true, runValidators: true }
+      );
+
+      if (!product) {
+        throw new Error(
+          `Product ${item.product} was not found while restoring stock`
+        );
+      }
+    }
+
+    order.status = "Cancelled";
+    await order.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Order cancelled and stock restored successfully",
+      order,
+    });
+  } catch (error) {
+    console.error("Cancel order error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to cancel order",
+    });
+  }
+};
+
+
 module.exports = {
   createOrder,
   getMyOrders,
   getOrderById,
+  cancelMyOrder
 };

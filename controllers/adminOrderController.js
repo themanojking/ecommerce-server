@@ -1,6 +1,7 @@
 
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
+const Product = require("../models/Product");
 
 // @desc    Get all orders
 // @route   GET /api/admin/orders
@@ -12,7 +13,7 @@ const getAllOrders = async (req, res) => {
       .populate("orderItems.product", "productName images price")
       .sort({ createdAt: -1 });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       count: orders.length,
       orders,
@@ -20,7 +21,7 @@ const getAllOrders = async (req, res) => {
   } catch (error) {
     console.error("Get all orders error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to fetch orders",
     });
@@ -52,21 +53,21 @@ const getAdminOrderById = async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       order,
     });
   } catch (error) {
     console.error("Get order details error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to fetch order details",
     });
   }
 };
 
-// @desc    Update order status
+// @desc    Update order status and restore stock on cancellation
 // @route   PUT /api/admin/orders/:id/status
 // @access  Admin
 const updateOrderStatus = async (req, res) => {
@@ -107,18 +108,59 @@ const updateOrderStatus = async (req, res) => {
       });
     }
 
+    // Prevent duplicate stock restoration.
+    if (order.status === "Cancelled" && status === "Cancelled") {
+      return res.status(200).json({
+        success: true,
+        message: "Order is already cancelled",
+        order,
+      });
+    }
+
+    // Do not allow a cancelled order to be reopened here.
+    // Its stock has already been returned.
+    if (order.status === "Cancelled" && status !== "Cancelled") {
+      return res.status(400).json({
+        success: false,
+        message: "A cancelled order cannot be reopened",
+      });
+    }
+
+    // Restore product stock before saving the cancellation.
+    if (status === "Cancelled") {
+      for (const item of order.orderItems) {
+        const restoredProduct = await Product.findByIdAndUpdate(
+          item.product,
+          {
+            $inc: { stock: item.quantity },
+            $set: { isAvailable: true },
+          },
+          { new: true, runValidators: true }
+        );
+
+        if (!restoredProduct) {
+          throw new Error(
+            `Product ${item.product} was not found while restoring stock`
+          );
+        }
+      }
+    }
+
     order.status = status;
     await order.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: "Order status updated successfully",
+      message:
+        status === "Cancelled"
+          ? "Order cancelled and product stock restored successfully"
+          : "Order status updated successfully",
       order,
     });
   } catch (error) {
     console.error("Update order status error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to update order status",
     });
