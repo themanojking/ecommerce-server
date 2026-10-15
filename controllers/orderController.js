@@ -146,19 +146,44 @@ if (updatedProduct && updatedProduct.stock === 0) {
 
     const shippingPrice = 0;
 
-    const order = await Order.create({
-      user: req.user._id,
-      orderItems: validatedItems.map((item) => ({
-        product: item.product,
-        quantity: item.quantity,
-        price: item.price,
-      })),
-      shippingAddress,
-      paymentMethod: "COD",
-      itemsPrice,
-      shippingPrice,
-      totalPrice: itemsPrice + shippingPrice,
-    });
+    
+const order = await Order.create({
+  user: req.user._id,
+  orderItems: validatedItems.map((item) => ({
+    product: item.product,
+    quantity: item.quantity,
+    price: item.price,
+  })),
+  shippingAddress,
+  paymentMethod: "COD",
+  itemsPrice,
+  shippingPrice,
+  totalPrice: itemsPrice + shippingPrice,
+});
+
+// Create notification after the order is saved.
+// Notification failure should not cancel a successful order.
+try {
+  await Notification.create({
+    type: "NEW_ORDER",
+    title: "New order received",
+    message: `A new order has been placed. Order ID: ${order._id}`,
+    user: req.user._id,
+    order: order._id,
+  });
+} catch (notificationError) {
+  console.error(
+    "Notification creation failed:",
+    notificationError.message
+  );
+}
+
+return res.status(201).json({
+  success: true,
+  message: "Order placed successfully",
+  order,
+});
+
 
     return res.status(201).json({
       success: true,
