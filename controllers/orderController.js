@@ -167,7 +167,7 @@ try {
   await Notification.create({
     type: "NEW_ORDER",
     title: "New order received",
-    message: `A new order has been placed. Order ID: ${order._id}`,
+    message: `${req.user.name} placed a new order. Order ID: ${order._id}`,
     user: req.user._id,
     order: order._id,
   });
