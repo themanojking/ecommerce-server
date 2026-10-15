@@ -2,6 +2,7 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
+const Notification = require("../models/Notification")
 
 // Restore reserved stock if order creation fails.
 const restoreStock = async (reservedItems) => {
@@ -164,6 +165,15 @@ if (updatedProduct && updatedProduct.stock === 0) {
       message: "Order placed successfully",
       order,
     });
+
+    await Notification.create({
+    type: "NEW_ORDER",
+    title: "New order received",
+    message: `A new order has been placed. Order ID: ${order._id}`,
+    user: req.user._id,
+    order: order._id,
+  });
+
   } catch (error) {
     console.error("Create order error:", error);
 
