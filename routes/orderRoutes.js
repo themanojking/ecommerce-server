@@ -14,6 +14,6 @@ const { protect } = require("../middlewares/authMiddleware");
 router.post("/", protect, createOrder);
 router.get("/myorders", protect, getMyOrders);
 router.get("/:id", protect, getOrderById);
-router.put("/:id/canel", protect, cancelMyOrder);
+router.put("/:id/cancel", protect, cancelMyOrder);
 
 module.exports = router;
