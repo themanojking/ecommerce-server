@@ -12,16 +12,22 @@ const getDashboardStats = async (req, res) => {
       lowStockProducts,
       recentOrders,
     ] = await Promise.all([
+      // Total products
       Product.countDocuments(),
 
+      // Total orders
       Order.countDocuments(),
 
+      // Pending orders
       Order.countDocuments({ status: "Pending" }),
 
+      // Total revenue excluding cancelled orders
       Order.aggregate([
         {
           $match: {
-            status: { $nin: ["Cancelled", "cancelled", "CANCELLED"] },
+            status: {
+              $nin: ["Cancelled", "cancelled", "CANCELLED"],
+            },
           },
         },
         {
@@ -41,17 +47,22 @@ const getDashboardStats = async (req, res) => {
         },
       ]),
 
+      // Low-stock products
       Product.find({ stock: { $lte: 5 } })
         .select("productName stock category price images")
         .sort({ stock: 1 })
         .limit(10)
         .lean(),
 
+      // Latest 5 orders, including ordered products and quantities
       Order.find()
         .populate("user", "name useremail")
+        .populate("orderItems.product", "productName")
         .sort({ createdAt: -1 })
         .limit(5)
-        .select("user totalPrice status createdAt paymentMethod")
+        .select(
+          "user orderItems totalPrice status createdAt paymentMethod"
+        )
         .lean(),
     ]);
 
