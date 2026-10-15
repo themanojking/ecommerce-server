@@ -1,8 +1,8 @@
-
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
-const Notification = require("../models/Notification")
+const Notification = require("../models/Notification");
+const ShippingSettings = require("../models/ShippingSettings");
 
 // Restore reserved stock if order creation fails.
 const restoreStock = async (reservedItems) => {
@@ -20,10 +20,12 @@ const restoreStock = async (reservedItems) => {
 // POST /api/orders
 const createOrder = async (req, res) => {
   const reservedItems = [];
+  let orderCreated = false;
 
   try {
     const { orderItems, shippingAddress, paymentMethod } = req.body;
 
+    // Validate order items.
     if (!Array.isArray(orderItems) || orderItems.length === 0) {
       return res.status(400).json({
         success: false,
@@ -31,6 +33,7 @@ const createOrder = async (req, res) => {
       });
     }
 
+    // Validate shipping address.
     const requiredFields = [
       "name",
       "useremail",
@@ -54,6 +57,7 @@ const createOrder = async (req, res) => {
       });
     }
 
+    // Only Cash on Delivery is supported.
     if (paymentMethod && paymentMethod !== "COD") {
       return res.status(400).json({
         success: false,
@@ -61,12 +65,32 @@ const createOrder = async (req, res) => {
       });
     }
 
+    // Fetch shipping settings before reserving stock.
+    // Do not silently place an order with zero shipping if
+    // the shipping settings cannot be read from the database.
+    const shippingSettings = await ShippingSettings.findOne();
+
+    if (
+      !shippingSettings ||
+      !Number.isFinite(Number(shippingSettings.shippingAmount)) ||
+      Number(shippingSettings.shippingAmount) < 0
+    ) {
+      return res.status(503).json({
+        success: false,
+        message:
+          "Shipping settings are unavailable. Please try again later.",
+      });
+    }
+
+    const shippingPrice = Number(shippingSettings.shippingAmount);
+
     let itemsPrice = 0;
     const validatedItems = [];
 
     // Validate products and calculate prices on the server.
     for (const item of orderItems) {
       if (
+        !item ||
         !mongoose.isValidObjectId(item.product) ||
         !Number.isInteger(Number(item.quantity)) ||
         Number(item.quantity) < 1
@@ -77,6 +101,7 @@ const createOrder = async (req, res) => {
         });
       }
 
+      const quantity = Number(item.quantity);
       const product = await Product.findById(item.product);
 
       if (!product) {
@@ -88,7 +113,7 @@ const createOrder = async (req, res) => {
 
       if (
         product.isAvailable === false ||
-        Number(product.stock) < Number(item.quantity)
+        Number(product.stock) < quantity
       ) {
         return res.status(400).json({
           success: false,
@@ -96,8 +121,14 @@ const createOrder = async (req, res) => {
         });
       }
 
-      const quantity = Number(item.quantity);
       const price = Number(product.price);
+
+      if (!Number.isFinite(price) || price < 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid price for ${product.productName}`,
+        });
+      }
 
       itemsPrice += price * quantity;
 
@@ -112,21 +143,16 @@ const createOrder = async (req, res) => {
     // Reserve stock atomically to prevent overselling.
     for (const item of validatedItems) {
       const updatedProduct = await Product.findOneAndUpdate(
-  {
-    _id: item.product,
-    isAvailable: { $ne: false },
-    stock: { $gte: item.quantity },
-  },
-  {
-    $inc: { stock: -item.quantity },
-  },
-  { returnDocument: "after" }
-);
-
-if (updatedProduct && updatedProduct.stock === 0) {
-  updatedProduct.isAvailable = false;
-  await updatedProduct.save();
-}
+        {
+          _id: item.product,
+          isAvailable: { $ne: false },
+          stock: { $gte: item.quantity },
+        },
+        {
+          $inc: { stock: -item.quantity },
+        },
+        { new: true }
+      );
 
       if (!updatedProduct) {
         await restoreStock(reservedItems);
@@ -142,71 +168,72 @@ if (updatedProduct && updatedProduct.stock === 0) {
         product: item.product,
         quantity: item.quantity,
       });
+
+      // Mark product unavailable when stock reaches zero.
+      if (Number(updatedProduct.stock) === 0) {
+        await Product.updateOne(
+          { _id: item.product },
+          { $set: { isAvailable: false } }
+        );
+      }
     }
 
-    const shippingPrice = 0;
+    // Calculate the final order total on the server.
+    const totalPrice = itemsPrice + shippingPrice;
 
-    
-const order = await Order.create({
-  user: req.user._id,
-  orderItems: validatedItems.map((item) => ({
-    product: item.product,
-    quantity: item.quantity,
-    price: item.price,
-  })),
-  shippingAddress,
-  paymentMethod: "COD",
-  itemsPrice,
-  shippingPrice,
-  totalPrice: itemsPrice + shippingPrice,
-});
+    // Save the order.
+    const order = await Order.create({
+      user: req.user._id,
+      orderItems: validatedItems.map((item) => ({
+        product: item.product,
+        quantity: item.quantity,
+        price: item.price,
+      })),
+      shippingAddress,
+      paymentMethod: "COD",
+      itemsPrice,
+      shippingPrice,
+      totalPrice,
+    });
 
-// Create notification after the order is saved.
-// Notification failure should not cancel a successful order.
-try {
-  await Notification.create({
-    type: "NEW_ORDER",
-    title: "New order received",
-    message: `${req.user.name} placed a new order. Order ID: ${order._id}`,
-    user: req.user._id,
-    order: order._id,
-  });
-} catch (notificationError) {
-  console.error(
-    "Notification creation failed:",
-    notificationError.message
-  );
-}
+    orderCreated = true;
 
-return res.status(201).json({
-  success: true,
-  message: "Order placed successfully",
-  order,
-});
-
+    // Create notification after the order is saved.
+    // Notification failure must not cancel a successful order.
+    try {
+      await Notification.create({
+        type: "NEW_ORDER",
+        title: "New order received",
+        message: `${req.user.name} placed a new order. Order ID: ${order._id}`,
+        user: req.user._id,
+        order: order._id,
+      });
+    } catch (notificationError) {
+      console.error(
+        "Notification creation failed:",
+        notificationError.message
+      );
+    }
 
     return res.status(201).json({
       success: true,
       message: "Order placed successfully",
       order,
     });
-
-    await Notification.create({
-    type: "NEW_ORDER",
-    title: "New order received",
-    message: `A new order has been placed. Order ID: ${order._id}`,
-    user: req.user._id,
-    order: order._id,
-  });
-
   } catch (error) {
     console.error("Create order error:", error);
 
-    // Restore stock if an error occurs after reserving it.
-    try {
-      await restoreStock(reservedItems);
-    } catch (restoreError) {
-      console.error("Stock restoration error:", restoreError);
+    // Restore stock only if order creation failed before
+    // an order was successfully saved.
+    if (!orderCreated && reservedItems.length > 0) {
+      try {
+        await restoreStock(reservedItems);
+      } catch (restoreError) {
+        console.error(
+          "Stock restoration error:",
+          restoreError.message
+        );
+      }
     }
 
     return res.status(500).json({
@@ -284,7 +311,7 @@ const getOrderById = async (req, res) => {
   }
 };
 
-
+// PUT /api/orders/:id/cancel
 const cancelMyOrder = async (req, res) => {
   try {
     const { id } = req.params;
@@ -315,7 +342,7 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // Only allow cancellation before shipping/delivery.
+    // Do not allow cancellation after shipping or delivery.
     if (["Shipped", "Delivered"].includes(order.status)) {
       return res.status(400).json({
         success: false,
@@ -331,7 +358,7 @@ const cancelMyOrder = async (req, res) => {
           $inc: { stock: item.quantity },
           $set: { isAvailable: true },
         },
-        { returnDocument: "after", runValidators: true }
+        { new: true, runValidators: true }
       );
 
       if (!product) {
@@ -359,10 +386,9 @@ const cancelMyOrder = async (req, res) => {
   }
 };
 
-
 module.exports = {
   createOrder,
   getMyOrders,
   getOrderById,
-  cancelMyOrder
+  cancelMyOrder,
 };
