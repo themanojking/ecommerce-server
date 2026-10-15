@@ -2,6 +2,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const Notification = require("../models/Notification");
 
 const createToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -66,6 +67,13 @@ const register = async (req, res) => {
       role: "customer",
     });
 
+    await Notification.create({
+  type: "NEW_USER",
+  title: "New customer registered",
+  message: `${user.name} created an account.`,
+  user: user._id,
+});
+
     return sendAuthResponse(res, user, 201);
   } catch (error) {
     if (error.code === 11000) {
@@ -111,6 +119,15 @@ const login = async (req, res) => {
         message: "Invalid email or password.",
       });
     }
+
+    if (user.role === "customer") {
+  await Notification.create({
+    type: "USER_LOGIN",
+    title: "Customer logged in",
+    message: `${user.name} logged in.`,
+    user: user._id,
+  });
+}
 
     return sendAuthResponse(res, user);
   } catch (error) {
