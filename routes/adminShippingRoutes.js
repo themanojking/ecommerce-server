@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const ShippingSettings = require("../models/ShippingSettings");
-const { protect, adminOnly } = require("../middleware/authMiddleware");
+const { protect, adminOnly } = require("../middlewares/authMiddleware");
 
 // Public: get current shipping amount
 router.get("/", async (req, res) => {
