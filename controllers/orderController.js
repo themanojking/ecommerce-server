@@ -119,7 +119,7 @@ const createOrder = async (req, res) => {
   {
     $inc: { stock: -item.quantity },
   },
-  { new: true }
+  { returnDocument: "after" }
 );
 
 if (updatedProduct && updatedProduct.stock === 0) {
@@ -296,7 +296,7 @@ const cancelMyOrder = async (req, res) => {
           $inc: { stock: item.quantity },
           $set: { isAvailable: true },
         },
-        { new: true, runValidators: true }
+        { returnDocument: "after", runValidators: true }
       );
 
       if (!product) {

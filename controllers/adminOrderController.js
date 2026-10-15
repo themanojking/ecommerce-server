@@ -135,7 +135,7 @@ const updateOrderStatus = async (req, res) => {
             $inc: { stock: item.quantity },
             $set: { isAvailable: true },
           },
-          { new: true, runValidators: true }
+          { returnDocument: "after", runValidators: true }
         );
 
         if (!restoredProduct) {
