@@ -13,6 +13,7 @@ const adminOrderRoutes = require('./routes/adminOrderRoutes');
 const adminUserRoutes = require('./routes/adminUserRoutes');
 const adminCategoryRoutes = require('./routes/adminCategoryRoutes');
 const adminNotificationRoutes = require('./routes/adminNotificationRoutes');
+const adminShippingRoutes = require('./routes/adminShippingRoutes');
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.use("/api/admin/products", adminProductRoutes);
 app.use("/api/admin/orders", adminOrderRoutes);
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/categories", adminCategoryRoutes);
+app.use("/api/admin/shipping", adminShippingRoutes)
 
 app.get("/", (req, res) => {
   res.json({
