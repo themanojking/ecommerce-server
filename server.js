@@ -17,6 +17,7 @@ const adminShippingRoutes = require('./routes/adminShippingRoutes');
 
 const app = express();
 
+
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
@@ -32,12 +33,13 @@ app.use(
       }
 
       console.error("Blocked by CORS:", origin);
-      return callback(new Error("Not allowed by CORS"));
+      return callback(new Error(`Not allowed by CORS: ${origin}`));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
 
 app.use(express.json());
 
