@@ -576,6 +576,14 @@ const createRazorpayOrder = async (req, res) => {
       totalPrice,
     });
 
+    console.log("DEBUG PAYMENT TOTALS:", {
+  itemsPrice,
+  shippingPrice,
+  totalPrice,
+  amountInPaise,
+  orderItems,
+});
+
     try {
       await Notification.create({
         type: "NEW_ORDER",
