@@ -3,6 +3,8 @@ const Order = require("../models/Order");
 const Product = require("../models/Product");
 const Notification = require("../models/Notification");
 const ShippingSettings = require("../models/ShippingSettings");
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
 
 // Restore reserved stock if order creation fails.
 const restoreStock = async (reservedItems) => {
@@ -386,9 +388,373 @@ const cancelMyOrder = async (req, res) => {
   }
 };
 
+
+const createRazorpayOrder = async (req, res) => {
+  const reservedItems = [];
+  let savedOrder = null;
+
+  try {
+    const { orderItems, shippingAddress } = req.body;
+
+    if (!Array.isArray(orderItems) || orderItems.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No order items provided",
+      });
+    }
+
+    const requiredFields = [
+      "name",
+      "useremail",
+      "phone",
+      "address",
+      "city",
+      "state",
+      "postalCode",
+      "country",
+    ];
+
+    if (
+      !shippingAddress ||
+      requiredFields.some(
+        (field) => !String(shippingAddress[field] || "").trim()
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a complete shipping address",
+      });
+    }
+
+    if (
+      !process.env.RAZORPAY_KEY_ID ||
+      !process.env.RAZORPAY_KEY_SECRET
+    ) {
+      return res.status(503).json({
+        success: false,
+        message: "Online payment is not configured",
+      });
+    }
+
+    const shippingSettings = await ShippingSettings.findOne();
+
+    if (
+      !shippingSettings ||
+      !Number.isFinite(Number(shippingSettings.shippingAmount)) ||
+      Number(shippingSettings.shippingAmount) < 0
+    ) {
+      return res.status(503).json({
+        success: false,
+        message: "Shipping settings are unavailable",
+      });
+    }
+
+    const shippingPrice = Number(shippingSettings.shippingAmount);
+    const validatedItems = [];
+    let itemsPrice = 0;
+
+    // Always use database prices, never frontend prices.
+    for (const item of orderItems) {
+      if (
+        !item ||
+        !mongoose.isValidObjectId(item.product) ||
+        !Number.isInteger(Number(item.quantity)) ||
+        Number(item.quantity) < 1
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid product or quantity",
+        });
+      }
+
+      const quantity = Number(item.quantity);
+      const product = await Product.findById(item.product);
+
+      if (
+        !product ||
+        product.isAvailable === false ||
+        Number(product.stock) < quantity
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "A product is unavailable or has insufficient stock",
+        });
+      }
+
+      const price = Number(product.price);
+
+      if (!Number.isFinite(price) || price < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid product price",
+        });
+      }
+
+      itemsPrice += price * quantity;
+
+      validatedItems.push({
+        product: product._id,
+        quantity,
+        price,
+        productName: product.productName,
+      });
+    }
+
+    const totalPrice = itemsPrice + shippingPrice;
+
+    // Razorpay accepts the amount in paise (₹1 = 100 paise).
+    const amountInPaise = Math.round(totalPrice * 100);
+
+    if (!Number.isSafeInteger(amountInPaise) || amountInPaise <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order total",
+      });
+    }
+
+    const razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+
+    // Create a gateway order on the server.
+    const gatewayOrder = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: `order_${new mongoose.Types.ObjectId()}`,
+      notes: {
+        userId: req.user._id.toString(),
+      },
+    });
+
+    // Reserve stock atomically.
+    for (const item of validatedItems) {
+      const updatedProduct = await Product.findOneAndUpdate(
+        {
+          _id: item.product,
+          isAvailable: { $ne: false },
+          stock: { $gte: item.quantity },
+        },
+        {
+          $inc: { stock: -item.quantity },
+        },
+        { new: true }
+      );
+
+      if (!updatedProduct) {
+        throw new Error(
+          `${item.productName} no longer has enough stock. Please refresh your cart.`
+        );
+      }
+
+      reservedItems.push({
+        product: item.product,
+        quantity: item.quantity,
+      });
+
+      if (Number(updatedProduct.stock) === 0) {
+        await Product.updateOne(
+          { _id: item.product },
+          { $set: { isAvailable: false } }
+        );
+      }
+    }
+
+    savedOrder = await Order.create({
+      user: req.user._id,
+      orderItems: validatedItems.map((item) => ({
+        product: item.product,
+        quantity: item.quantity,
+        price: item.price,
+      })),
+      shippingAddress,
+      paymentMethod: "Razorpay",
+      paymentStatus: "Pending",
+      razorpayOrderId: gatewayOrder.id,
+      itemsPrice,
+      shippingPrice,
+      totalPrice,
+    });
+
+    try {
+      await Notification.create({
+        type: "NEW_ORDER",
+        title: "New online order received",
+        message: `${req.user.name} started an online order. Order ID: ${savedOrder._id}`,
+        user: req.user._id,
+        order: savedOrder._id,
+      });
+    } catch (notificationError) {
+      console.error(
+        "Notification creation failed:",
+        notificationError.message
+      );
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: "Payment order created",
+      orderId: savedOrder._id,
+      razorpayOrderId: gatewayOrder.id,
+      amount: gatewayOrder.amount,
+      currency: gatewayOrder.currency,
+      keyId: process.env.RAZORPAY_KEY_ID,
+    });
+  } catch (error) {
+    console.error("Create Razorpay order error:", error);
+
+    // Roll back the stock reservation if the order wasn't saved.
+    if (!savedOrder && reservedItems.length > 0) {
+      try {
+        for (const item of reservedItems) {
+          await Product.updateOne(
+            { _id: item.product },
+            {
+              $inc: { stock: item.quantity },
+              $set: { isAvailable: true },
+            }
+          );
+        }
+      } catch (restoreError) {
+        console.error("Stock restoration error:", restoreError.message);
+      }
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Failed to create payment order",
+    });
+  }
+};
+
+const verifyRazorpayPayment = async (req, res) => {
+  try {
+    const {
+      orderId,
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+    } = req.body;
+
+    if (
+      !mongoose.isValidObjectId(orderId) ||
+      !razorpay_order_id ||
+      !razorpay_payment_id ||
+      !razorpay_signature
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing or invalid payment details",
+      });
+    }
+
+    const order = await Order.findOne({
+      _id: orderId,
+      user: req.user._id,
+      paymentMethod: "Razorpay",
+    }).select("+razorpaySignature");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Online order not found",
+      });
+    }
+
+    if (order.razorpayOrderId !== razorpay_order_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment order does not match",
+      });
+    }
+
+    // Idempotency: don't process the same successful payment twice.
+    if (order.paymentStatus === "Paid") {
+      if (order.razorpayPaymentId === razorpay_payment_id) {
+        return res.status(200).json({
+          success: true,
+          message: "Payment already verified",
+          order,
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        message: "This order has already been paid",
+      });
+    }
+
+    if (order.status === "Cancelled") {
+      return res.status(400).json({
+        success: false,
+        message: "This order has been cancelled",
+      });
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+
+    const received = Buffer.from(razorpay_signature, "utf8");
+    const expected = Buffer.from(expectedSignature, "utf8");
+
+    if (
+      received.length !== expected.length ||
+      !crypto.timingSafeEqual(received, expected)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment signature verification failed",
+      });
+    }
+
+    // Also confirm the gateway reports this payment as captured.
+    const razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+
+    const payment = await razorpay.payments.fetch(razorpay_payment_id);
+
+    if (
+      payment.order_id !== razorpay_order_id ||
+      payment.status !== "captured" ||
+      Number(payment.amount) !== Math.round(Number(order.totalPrice) * 100) ||
+      payment.currency !== "INR"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment has not been captured or does not match the order",
+      });
+    }
+
+    order.paymentStatus = "Paid";
+    order.razorpayPaymentId = razorpay_payment_id;
+    order.razorpaySignature = razorpay_signature;
+    await order.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment verified successfully",
+      order,
+    });
+  } catch (error) {
+    console.error("Verify Razorpay payment error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to verify payment. Please check your order before retrying.",
+    });
+  }
+};
+
+
 module.exports = {
   createOrder,
   getMyOrders,
   getOrderById,
   cancelMyOrder,
+  createRazorpayOrder,
+  verifyRazorpayPayment,
 };
