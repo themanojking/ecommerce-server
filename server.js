@@ -17,7 +17,6 @@ const adminShippingRoutes = require('./routes/adminShippingRoutes');
 
 const app = express();
 
-
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
@@ -39,6 +38,7 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
 
 
 app.use(express.json());
