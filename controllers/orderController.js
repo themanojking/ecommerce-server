@@ -12,19 +12,22 @@ const ShippingSettings = require("../models/ShippingSettings");
 // --------------------------------------------------
 // Generate sequential order number: 1, 2, 3, 4...
 // Shared by COD and Razorpay orders.
+// IMPORTANT: await must be inside an async function.
 // --------------------------------------------------
 
-const counter = await Counter.findOneAndUpdate(
-  { _id: "orderNumber" },
-  { $inc: { sequenceValue: 1 } },
-  {
-    new: true,
-    upsert: true,
-    setDefaultsOnInsert: true,
-  }
-);
+const getNextOrderNumber = async () => {
+  const counter = await Counter.findOneAndUpdate(
+    { _id: "orderNumber" },
+    { $inc: { sequenceValue: 1 } },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+    }
+  );
 
-const orderNumber = counter.sequenceValue;
+  return counter.sequenceValue;
+};
 
 // --------------------------------------------------
 // Restore reserved stock
@@ -100,8 +103,7 @@ const createOrder = async (req, res) => {
     ) {
       return res.status(503).json({
         success: false,
-        message:
-          "Shipping settings are unavailable. Please try again later.",
+        message: "Shipping settings are unavailable. Please try again later.",
       });
     }
 
@@ -201,7 +203,7 @@ const createOrder = async (req, res) => {
 
     const totalPrice = itemsPrice + shippingPrice;
 
-    // Generate the next sequential order number.
+    // FIX: Generate the number inside this async controller.
     const orderNumber = await getNextOrderNumber();
 
     const order = await Order.create({
@@ -249,10 +251,7 @@ const createOrder = async (req, res) => {
       try {
         await restoreStock(reservedItems);
       } catch (restoreError) {
-        console.error(
-          "Stock restoration error:",
-          restoreError.message
-        );
+        console.error("Stock restoration error:", restoreError.message);
       }
     }
 
@@ -381,8 +380,7 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // Do not allow cancelling a paid order through this
-    // basic cancellation route without handling its refund.
+    // Paid orders need a refund-aware cancellation process.
     if (order.paymentStatus === "Paid") {
       return res.status(400).json({
         success: false,
@@ -597,7 +595,7 @@ const createRazorpayOrder = async (req, res) => {
       }
     }
 
-    // Generate from the same counter used by COD.
+    // FIX: Use the same counter as COD.
     const orderNumber = await getNextOrderNumber();
 
     savedOrder = await Order.create({
@@ -649,10 +647,7 @@ const createRazorpayOrder = async (req, res) => {
       try {
         await restoreStock(reservedItems);
       } catch (restoreError) {
-        console.error(
-          "Stock restoration error:",
-          restoreError.message
-        );
+        console.error("Stock restoration error:", restoreError.message);
       }
     }
 
@@ -764,8 +759,7 @@ const verifyRazorpayPayment = async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message:
-          "Payment has not been captured or does not match the order",
+        message: "Payment has not been captured or does not match the order",
       });
     }
 
@@ -785,8 +779,7 @@ const verifyRazorpayPayment = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message:
-        "Unable to verify payment. Please check your order before retrying.",
+      message: "Unable to verify payment. Please check your order before retrying.",
     });
   }
 };
