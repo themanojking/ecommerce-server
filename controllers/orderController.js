@@ -14,19 +14,17 @@ const ShippingSettings = require("../models/ShippingSettings");
 // Shared by COD and Razorpay orders.
 // --------------------------------------------------
 
-const getNextOrderNumber = async () => {
-  const counter = await Counter.findOneAndUpdate(
-    { _id: "orderNumber" },
-    { $inc: { sequenceValue: 1 } },
-    {
-      new: true,
-      upsert: true,
-      setDefaultsOnInsert: true,
-    }
-  );
+const counter = await Counter.findOneAndUpdate(
+  { _id: "orderNumber" },
+  { $inc: { sequenceValue: 1 } },
+  {
+    new: true,
+    upsert: true,
+    setDefaultsOnInsert: true,
+  }
+);
 
-  return counter.sequenceValue;
-};
+const orderNumber = counter.sequenceValue;
 
 // --------------------------------------------------
 // Restore reserved stock

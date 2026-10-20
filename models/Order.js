@@ -5,6 +5,7 @@ const orderSchema = new mongoose.Schema(
     // Sequential display order number
     orderNumber: {
       type: Number,
+      required: true,
       unique: true,
       index: true,
     },
