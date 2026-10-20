@@ -1,8 +1,14 @@
-
 const mongoose = require("mongoose");
 
 const orderSchema = new mongoose.Schema(
   {
+    // Sequential display order number
+    orderNumber: {
+      type: Number,
+      unique: true,
+      index: true,
+    },
+
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

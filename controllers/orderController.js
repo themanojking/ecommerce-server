@@ -1,12 +1,37 @@
+
 const mongoose = require("mongoose");
-const Order = require("../models/Order");
-const Product = require("../models/Product");
-const Notification = require("../models/Notification");
-const ShippingSettings = require("../models/ShippingSettings");
 const crypto = require("crypto");
 const Razorpay = require("razorpay");
 
-// Restore reserved stock if order creation fails.
+const Order = require("../models/Order");
+const Counter = require("../models/Counter");
+const Product = require("../models/Product");
+const Notification = require("../models/Notification");
+const ShippingSettings = require("../models/ShippingSettings");
+
+// --------------------------------------------------
+// Generate sequential order number: 1, 2, 3, 4...
+// Shared by COD and Razorpay orders.
+// --------------------------------------------------
+
+const getNextOrderNumber = async () => {
+  const counter = await Counter.findOneAndUpdate(
+    { _id: "orderNumber" },
+    { $inc: { sequenceValue: 1 } },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+    }
+  );
+
+  return counter.sequenceValue;
+};
+
+// --------------------------------------------------
+// Restore reserved stock
+// --------------------------------------------------
+
 const restoreStock = async (reservedItems) => {
   for (const item of reservedItems) {
     await Product.updateOne(
@@ -19,7 +44,11 @@ const restoreStock = async (reservedItems) => {
   }
 };
 
+// --------------------------------------------------
 // POST /api/orders
+// Create Cash on Delivery order
+// --------------------------------------------------
+
 const createOrder = async (req, res) => {
   const reservedItems = [];
   let orderCreated = false;
@@ -27,7 +56,6 @@ const createOrder = async (req, res) => {
   try {
     const { orderItems, shippingAddress, paymentMethod } = req.body;
 
-    // Validate order items.
     if (!Array.isArray(orderItems) || orderItems.length === 0) {
       return res.status(400).json({
         success: false,
@@ -35,7 +63,6 @@ const createOrder = async (req, res) => {
       });
     }
 
-    // Validate shipping address.
     const requiredFields = [
       "name",
       "useremail",
@@ -59,7 +86,6 @@ const createOrder = async (req, res) => {
       });
     }
 
-    // Only Cash on Delivery is supported.
     if (paymentMethod && paymentMethod !== "COD") {
       return res.status(400).json({
         success: false,
@@ -67,9 +93,6 @@ const createOrder = async (req, res) => {
       });
     }
 
-    // Fetch shipping settings before reserving stock.
-    // Do not silently place an order with zero shipping if
-    // the shipping settings cannot be read from the database.
     const shippingSettings = await ShippingSettings.findOne();
 
     if (
@@ -85,7 +108,6 @@ const createOrder = async (req, res) => {
     }
 
     const shippingPrice = Number(shippingSettings.shippingAmount);
-
     let itemsPrice = 0;
     const validatedItems = [];
 
@@ -171,7 +193,6 @@ const createOrder = async (req, res) => {
         quantity: item.quantity,
       });
 
-      // Mark product unavailable when stock reaches zero.
       if (Number(updatedProduct.stock) === 0) {
         await Product.updateOne(
           { _id: item.product },
@@ -180,11 +201,13 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Calculate the final order total on the server.
     const totalPrice = itemsPrice + shippingPrice;
 
-    // Save the order.
+    // Generate the next sequential order number.
+    const orderNumber = await getNextOrderNumber();
+
     const order = await Order.create({
+      orderNumber,
       user: req.user._id,
       orderItems: validatedItems.map((item) => ({
         product: item.product,
@@ -200,13 +223,12 @@ const createOrder = async (req, res) => {
 
     orderCreated = true;
 
-    // Create notification after the order is saved.
     // Notification failure must not cancel a successful order.
     try {
       await Notification.create({
         type: "NEW_ORDER",
         title: "New order received",
-        message: `${req.user.name} placed a new order. Order ID: ${order._id}`,
+        message: `${req.user.name} placed order #${order.orderNumber}`,
         user: req.user._id,
         order: order._id,
       });
@@ -225,8 +247,6 @@ const createOrder = async (req, res) => {
   } catch (error) {
     console.error("Create order error:", error);
 
-    // Restore stock only if order creation failed before
-    // an order was successfully saved.
     if (!orderCreated && reservedItems.length > 0) {
       try {
         await restoreStock(reservedItems);
@@ -245,7 +265,11 @@ const createOrder = async (req, res) => {
   }
 };
 
+// --------------------------------------------------
 // GET /api/orders/myorders
+// Get logged-in user's orders
+// --------------------------------------------------
+
 const getMyOrders = async (req, res) => {
   try {
     const orders = await Order.find({ user: req.user._id })
@@ -267,7 +291,11 @@ const getMyOrders = async (req, res) => {
   }
 };
 
+// --------------------------------------------------
 // GET /api/orders/:id
+// Fetch order using MongoDB ID
+// --------------------------------------------------
+
 const getOrderById = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -313,7 +341,11 @@ const getOrderById = async (req, res) => {
   }
 };
 
+// --------------------------------------------------
 // PUT /api/orders/:id/cancel
+// Cancel an order and restore stock
+// --------------------------------------------------
+
 const cancelMyOrder = async (req, res) => {
   try {
     const { id } = req.params;
@@ -344,7 +376,6 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // Do not allow cancellation after shipping or delivery.
     if (["Shipped", "Delivered"].includes(order.status)) {
       return res.status(400).json({
         success: false,
@@ -352,7 +383,15 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // Restore stock for each product.
+    // Do not allow cancelling a paid order through this
+    // basic cancellation route without handling its refund.
+    if (order.paymentStatus === "Paid") {
+      return res.status(400).json({
+        success: false,
+        message: "Paid orders require a refund-aware cancellation process",
+      });
+    }
+
     for (const item of order.orderItems) {
       const product = await Product.findByIdAndUpdate(
         item.product,
@@ -388,6 +427,10 @@ const cancelMyOrder = async (req, res) => {
   }
 };
 
+// --------------------------------------------------
+// POST /api/orders/razorpay
+// Create Razorpay payment order
+// --------------------------------------------------
 
 const createRazorpayOrder = async (req, res) => {
   const reservedItems = [];
@@ -453,7 +496,6 @@ const createRazorpayOrder = async (req, res) => {
     const validatedItems = [];
     let itemsPrice = 0;
 
-    // Always use database prices, never frontend prices.
     for (const item of orderItems) {
       if (
         !item ||
@@ -501,8 +543,6 @@ const createRazorpayOrder = async (req, res) => {
     }
 
     const totalPrice = itemsPrice + shippingPrice;
-
-    // Razorpay accepts the amount in paise (₹1 = 100 paise).
     const amountInPaise = Math.round(totalPrice * 100);
 
     if (!Number.isSafeInteger(amountInPaise) || amountInPaise <= 0) {
@@ -517,7 +557,6 @@ const createRazorpayOrder = async (req, res) => {
       key_secret: process.env.RAZORPAY_KEY_SECRET,
     });
 
-    // Create a gateway order on the server.
     const gatewayOrder = await razorpay.orders.create({
       amount: amountInPaise,
       currency: "INR",
@@ -560,7 +599,11 @@ const createRazorpayOrder = async (req, res) => {
       }
     }
 
+    // Generate from the same counter used by COD.
+    const orderNumber = await getNextOrderNumber();
+
     savedOrder = await Order.create({
+      orderNumber,
       user: req.user._id,
       orderItems: validatedItems.map((item) => ({
         product: item.product,
@@ -576,19 +619,11 @@ const createRazorpayOrder = async (req, res) => {
       totalPrice,
     });
 
-    console.log("DEBUG PAYMENT TOTALS:", {
-  itemsPrice,
-  shippingPrice,
-  totalPrice,
-  amountInPaise,
-  orderItems,
-});
-
     try {
       await Notification.create({
         type: "NEW_ORDER",
         title: "New online order received",
-        message: `${req.user.name} started an online order. Order ID: ${savedOrder._id}`,
+        message: `${req.user.name} started order #${savedOrder.orderNumber}`,
         user: req.user._id,
         order: savedOrder._id,
       });
@@ -603,6 +638,7 @@ const createRazorpayOrder = async (req, res) => {
       success: true,
       message: "Payment order created",
       orderId: savedOrder._id,
+      orderNumber: savedOrder.orderNumber,
       razorpayOrderId: gatewayOrder.id,
       amount: gatewayOrder.amount,
       currency: gatewayOrder.currency,
@@ -611,20 +647,14 @@ const createRazorpayOrder = async (req, res) => {
   } catch (error) {
     console.error("Create Razorpay order error:", error);
 
-    // Roll back the stock reservation if the order wasn't saved.
     if (!savedOrder && reservedItems.length > 0) {
       try {
-        for (const item of reservedItems) {
-          await Product.updateOne(
-            { _id: item.product },
-            {
-              $inc: { stock: item.quantity },
-              $set: { isAvailable: true },
-            }
-          );
-        }
+        await restoreStock(reservedItems);
       } catch (restoreError) {
-        console.error("Stock restoration error:", restoreError.message);
+        console.error(
+          "Stock restoration error:",
+          restoreError.message
+        );
       }
     }
 
@@ -634,6 +664,11 @@ const createRazorpayOrder = async (req, res) => {
     });
   }
 };
+
+// --------------------------------------------------
+// POST /api/orders/verify-payment
+// Verify Razorpay payment
+// --------------------------------------------------
 
 const verifyRazorpayPayment = async (req, res) => {
   try {
@@ -676,7 +711,6 @@ const verifyRazorpayPayment = async (req, res) => {
       });
     }
 
-    // Idempotency: don't process the same successful payment twice.
     if (order.paymentStatus === "Paid") {
       if (order.razorpayPaymentId === razorpay_payment_id) {
         return res.status(200).json({
@@ -717,7 +751,6 @@ const verifyRazorpayPayment = async (req, res) => {
       });
     }
 
-    // Also confirm the gateway reports this payment as captured.
     const razorpay = new Razorpay({
       key_id: process.env.RAZORPAY_KEY_ID,
       key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -733,13 +766,15 @@ const verifyRazorpayPayment = async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Payment has not been captured or does not match the order",
+        message:
+          "Payment has not been captured or does not match the order",
       });
     }
 
     order.paymentStatus = "Paid";
     order.razorpayPaymentId = razorpay_payment_id;
     order.razorpaySignature = razorpay_signature;
+
     await order.save();
 
     return res.status(200).json({
@@ -752,11 +787,11 @@ const verifyRazorpayPayment = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Unable to verify payment. Please check your order before retrying.",
+      message:
+        "Unable to verify payment. Please check your order before retrying.",
     });
   }
 };
-
 
 module.exports = {
   createOrder,
