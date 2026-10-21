@@ -119,16 +119,6 @@ const login = async (req, res) => {
         message: "Invalid email or password.",
       });
     }
-
-    if (user.role === "customer") {
-  await Notification.create({
-    type: "USER_LOGIN",
-    title: "Customer logged in",
-    message: `${user.name} logged in.`,
-    user: user._id,
-  });
-}
-
     return sendAuthResponse(res, user);
   } catch (error) {
     console.error("Login error:", error.message);
