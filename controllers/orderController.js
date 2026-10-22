@@ -10,9 +10,7 @@ const Notification = require("../models/Notification");
 const ShippingSettings = require("../models/ShippingSettings");
 
 // --------------------------------------------------
-// Generate sequential order number: 1, 2, 3, 4...
-// Shared by COD and Razorpay orders.
-// IMPORTANT: await must be inside an async function.
+// Generate sequential order number: 1, 2, 3...
 // --------------------------------------------------
 
 const getNextOrderNumber = async () => {
@@ -43,6 +41,64 @@ const restoreStock = async (reservedItems) => {
       }
     );
   }
+};
+
+// --------------------------------------------------
+// Delivery estimate helpers
+// --------------------------------------------------
+
+const getIndiaTimeParts = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  return Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)])
+  );
+};
+
+// Before 4 PM IST: estimate 2 calendar days.
+// At/after 4 PM IST: estimate 3 calendar days.
+// This is an estimate, not a guaranteed carrier date.
+const getEstimatedDeliveryDate = (now = new Date()) => {
+  const { hour } = getIndiaTimeParts(now);
+  const daysToAdd = hour < 16 ? 2 : 3;
+
+  const estimatedDate = new Date(now);
+  estimatedDate.setUTCDate(estimatedDate.getUTCDate() + daysToAdd);
+
+  return estimatedDate;
+};
+
+const getDeliveryDetails = (body, shippingAddress) => {
+  const deliveryPincode = String(
+    body.deliveryPincode || shippingAddress?.postalCode || ""
+  ).trim();
+
+  if (!/^[1-9][0-9]{5}$/.test(deliveryPincode)) {
+    throw new Error("Please provide a valid 6-digit delivery pincode");
+  }
+
+  const addressPincode = String(
+    shippingAddress?.postalCode || ""
+  ).trim();
+
+  if (addressPincode !== deliveryPincode) {
+    throw new Error(
+      "Delivery pincode and shipping address postal code must match"
+    );
+  }
+
+  return {
+    deliveryPincode,
+    estimatedDeliveryDate: getEstimatedDeliveryDate(),
+  };
 };
 
 // --------------------------------------------------
@@ -84,6 +140,17 @@ const createOrder = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Please provide a complete shipping address",
+      });
+    }
+
+    let deliveryDetails;
+
+    try {
+      deliveryDetails = getDeliveryDetails(req.body, shippingAddress);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
       });
     }
 
@@ -202,8 +269,6 @@ const createOrder = async (req, res) => {
     }
 
     const totalPrice = itemsPrice + shippingPrice;
-
-    // FIX: Generate the number inside this async controller.
     const orderNumber = await getNextOrderNumber();
 
     const order = await Order.create({
@@ -215,6 +280,8 @@ const createOrder = async (req, res) => {
         price: item.price,
       })),
       shippingAddress,
+      deliveryPincode: deliveryDetails.deliveryPincode,
+      estimatedDeliveryDate: deliveryDetails.estimatedDeliveryDate,
       paymentMethod: "COD",
       itemsPrice,
       shippingPrice,
@@ -424,7 +491,7 @@ const cancelMyOrder = async (req, res) => {
 };
 
 // --------------------------------------------------
-// POST /api/orders/razorpay
+// POST /api/orders/razorpay/create
 // Create Razorpay payment order
 // --------------------------------------------------
 
@@ -462,6 +529,17 @@ const createRazorpayOrder = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Please provide a complete shipping address",
+      });
+    }
+
+    let deliveryDetails;
+
+    try {
+      deliveryDetails = getDeliveryDetails(req.body, shippingAddress);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
       });
     }
 
@@ -595,7 +673,6 @@ const createRazorpayOrder = async (req, res) => {
       }
     }
 
-    // FIX: Use the same counter as COD.
     const orderNumber = await getNextOrderNumber();
 
     savedOrder = await Order.create({
@@ -607,6 +684,8 @@ const createRazorpayOrder = async (req, res) => {
         price: item.price,
       })),
       shippingAddress,
+      deliveryPincode: deliveryDetails.deliveryPincode,
+      estimatedDeliveryDate: deliveryDetails.estimatedDeliveryDate,
       paymentMethod: "Razorpay",
       paymentStatus: "Pending",
       razorpayOrderId: gatewayOrder.id,
@@ -659,7 +738,7 @@ const createRazorpayOrder = async (req, res) => {
 };
 
 // --------------------------------------------------
-// POST /api/orders/verify-payment
+// POST /api/orders/razorpay/verify
 // Verify Razorpay payment
 // --------------------------------------------------
 
@@ -779,7 +858,8 @@ const verifyRazorpayPayment = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Unable to verify payment. Please check your order before retrying.",
+      message:
+        "Unable to verify payment. Please check your order before retrying.",
     });
   }
 };
