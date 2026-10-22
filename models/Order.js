@@ -106,16 +106,6 @@ const orderSchema = new mongoose.Schema(
       ],
       default: "Pending",
     },
-    deliveryPincode: {
-  type: String,
-  required: true,
-  match: /^[1-9][0-9]{5}$/,
-},
-
-estimatedDeliveryDate: {
-  type: Date,
-  required: true,
-},
   },
   { timestamps: true }
 );
