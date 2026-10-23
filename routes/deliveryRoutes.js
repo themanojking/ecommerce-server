@@ -3,36 +3,39 @@ const express = require("express");
 
 const router = express.Router();
 
-// Free Indian PIN code lookup API.
-// No API key required.
 const PINCODE_API_URL = "https://api.postalpincode.in/pincode";
 
-// Simple in-memory cache to reduce external API requests.
 const pincodeCache = new Map();
 const CACHE_DURATION = 24 * 60 * 60 * 1000;
 
-// Get the current date in India and add calendar days.
-function addDaysInIndia(days) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata",
+const INDIA_TIME_ZONE = "Asia/Kolkata";
+const DISPATCH_CUTOFF_HOUR = 16; // 4 PM IST
+
+// Get the current date and time in India.
+function getIndiaDateTime() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: INDIA_TIME_ZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
   }).formatToParts(new Date());
 
-  const values = Object.fromEntries(
+  return Object.fromEntries(
     parts.map(({ type, value }) => [type, value])
   );
+}
 
-  const date = new Date(
-    Date.UTC(
-      Number(values.year),
-      Number(values.month) - 1,
-      Number(values.day) + days,
-      12
-    )
-  );
+// Convert YYYY-MM-DD into a UTC date for safe date arithmetic.
+function toUTCDate(dateString) {
+  const [year, month, day] = dateString.split("-").map(Number);
 
+  return new Date(Date.UTC(year, month - 1, day, 12));
+}
+
+function toDateString(date) {
   return [
     date.getUTCFullYear(),
     String(date.getUTCMonth() + 1).padStart(2, "0"),
@@ -40,17 +43,63 @@ function addDaysInIndia(days) {
   ].join("-");
 }
 
+// Sunday is a non-working day.
+function isSunday(date) {
+  return date.getUTCDay() === 0;
+}
+
+// Add working days after the starting date, skipping Sundays.
+function addWorkingDays(startDate, days) {
+  const date = toUTCDate(startDate);
+  let addedDays = 0;
+
+  while (addedDays < days) {
+    date.setUTCDate(date.getUTCDate() + 1);
+
+    if (!isSunday(date)) {
+      addedDays++;
+    }
+  }
+
+  return toDateString(date);
+}
+
+// Find the order-processing start date.
+// Before 4 PM on a working day: start today.
+// At/after 4 PM: start next working day.
+// Sunday: start Monday.
+function getNextDispatchDate() {
+  const india = getIndiaDateTime();
+
+  const today = `${india.year}-${india.month}-${india.day}`;
+  const date = toUTCDate(today);
+
+  const hour = Number(india.hour);
+  const minute = Number(india.minute);
+
+  const cutoffPassed = hour >= DISPATCH_CUTOFF_HOUR;
+
+  if (isSunday(date) || cutoffPassed) {
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+
+  while (isSunday(date)) {
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+
+  return toDateString(date);
+}
+
 // Format a date-only value without shifting its calendar day.
 function formatDate(dateString, includeWeekday = true) {
-  const [year, month, day] = dateString.split("-").map(Number);
+  const date = toUTCDate(dateString);
 
-  const date = new Date(year, month - 1, day, 12);
-
-  return date.toLocaleDateString("en-IN", {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "UTC",
     ...(includeWeekday ? { weekday: "short" } : {}),
     month: "short",
     day: "numeric",
-  });
+  }).format(date);
 }
 
 // GET /api/delivery/check/613001
@@ -97,9 +146,6 @@ router.get("/check/:pincode", async (req, res) => {
       }
 
       const apiData = await response.json();
-
-      // PostalPincode.in response format:
-      // [{ Status: "Success", PostOffice: [...] }]
       const result = Array.isArray(apiData) ? apiData[0] : null;
 
       if (
@@ -123,13 +169,11 @@ router.get("/check/:pincode", async (req, res) => {
       });
     }
 
-    // A PIN may contain several post offices.
-    // Prefer a delivery office when one is available.
+    // Prefer a delivery post office when available.
     const office =
       postOffices.find(
         (item) =>
-          String(item.DeliveryStatus || "").toLowerCase() ===
-          "delivery"
+          String(item.DeliveryStatus || "").toLowerCase() === "delivery"
       ) || postOffices[0];
 
     const city = String(
@@ -145,13 +189,39 @@ router.get("/check/:pincode", async (req, res) => {
       });
     }
 
-    // DEMO estimate only.
-    // This does not confirm actual ST Courier serviceability.
+    // Estimates:
+    // 1 working day for dispatch + 2–4 working days for delivery.
+    // Sunday is excluded from all working-day calculations.
+    const dispatchDays = 1;
     const minDays = 2;
-    const maxDays = 3;
+    const maxDays = 4;
 
-    const estimatedDeliveryDate = addDaysInIndia(minDays);
-    const estimatedDeliveryEndDate = addDaysInIndia(maxDays);
+    // Determine the eligible processing start date using India time.
+    const orderProcessingDate = getNextDispatchDate();
+
+    // One working day for dispatch.
+    // The processing date itself is day one.
+    const dispatchDate = addWorkingDays(
+      orderProcessingDate,
+      dispatchDays - 1
+    );
+
+    // Add 2–4 working days after dispatch.
+    const estimatedDeliveryDate = addWorkingDays(
+      dispatchDate,
+      minDays
+    );
+
+    const estimatedDeliveryEndDate = addWorkingDays(
+      dispatchDate,
+      maxDays
+    );
+
+    const estimatedDateText =
+      `${formatDate(estimatedDeliveryDate, false)} – ${formatDate(
+        estimatedDeliveryEndDate,
+        false
+      )}`;
 
     return res.status(200).json({
       success: true,
@@ -161,12 +231,21 @@ router.get("/check/:pincode", async (req, res) => {
       district: office.District || city,
       state,
       postOffice: office.Name || "",
+
+      dispatchDays,
       minDays,
       maxDays,
+
+      orderProcessingDate,
+      dispatchDate,
+      dispatchDateText: formatDate(dispatchDate),
+
       estimatedDeliveryDate,
       estimatedDeliveryEndDate,
-      estimatedDateText: formatDate(estimatedDeliveryDate),
-      message: "Pincode found. Delivery dates are demo estimates.",
+      estimatedDateText,
+
+      message:
+        "Pincode found. Dispatch and delivery dates are demo estimates.",
     });
   } catch (error) {
     console.error("Delivery pincode lookup error:", error.message);
@@ -182,3 +261,4 @@ router.get("/check/:pincode", async (req, res) => {
 });
 
 module.exports = router;
+    
